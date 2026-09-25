@@ -173,23 +173,6 @@ Run using Live Server in VS Code.
 - When are the semester holidays?
 
 ---
-
-## 📸 Screenshots
-
-### Home Page
-
-<img width="706" height="393" alt="image" src="https://github.com/user-attachments/assets/9e22e3ad-d2e3-4e46-ab63-4b09d19d0672" />
-
-
-### Chat Interface
-
-<img width="706" height="425" alt="image" src="https://github.com/user-attachments/assets/c3e04293-6977-4662-a4bb-86a2cc8cec11" />
-
-
-### Response Example
-
-<img width="706" height="454" alt="image" src="https://github.com/user-attachments/assets/89dc2a1e-c53f-4c2f-857e-de6ed894d1f6" />
-
 ---
 
 ## 🔮 Future Enhancements

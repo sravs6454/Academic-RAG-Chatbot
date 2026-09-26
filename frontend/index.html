@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AcaRAG Pro — Academic Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════
+     PROFILE SETUP SCREEN  (shown on first visit / no profile)
+     ═══════════════════════════════════════════════════════════ -->
+<div class="profile-overlay" id="profileOverlay">
+  <div class="profile-card">
+    <div class="profile-card-logo">AR</div>
+    <h1 class="profile-card-title">AcaRAG Pro</h1>
+    <p class="profile-card-sub">Academic Assistant · SVECW, Bhimavaram</p>
+
+    <form class="profile-form" id="profileForm">
+      <div class="form-group">
+        <label>Your Name <span class="optional">(optional)</span></label>
+        <input type="text" id="pName" placeholder="e.g. Priya" maxlength="40" autocomplete="off" />
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label>Year <span class="required">*</span></label>
+          <select id="pYear" required>
+            <option value="">-- Select --</option>
+            <option value="1">1st Year</option>
+            <option value="2">2nd Year</option>
+            <option value="3">3rd Year</option>
+            <option value="4">4th Year</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Semester <span class="required">*</span></label>
+          <select id="pSemester" required>
+            <option value="">-- Select --</option>
+            <option value="1">Semester 1</option>
+            <option value="2">Semester 2</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Branch / Department <span class="required">*</span></label>
+        <select id="pBranch" required>
+          <option value="">-- Select --</option>
+          <option value="CSE">Computer Science &amp; Engineering (CSE)</option>
+          <option value="CSE-AI&ML">CSE (Artificial Intelligence &amp; ML)</option>
+          <option value="CSE-DS">CSE (Data Science)</option>
+          <option value="CSE-CS">CSE (Cyber Security)</option>
+          <option value="ECE">Electronics &amp; Communication Engineering (ECE)</option>
+          <option value="EEE">Electrical &amp; Electronics Engineering (EEE)</option>
+          <option value="ME">Mechanical Engineering (ME)</option>
+          <option value="CIVIL">Civil Engineering</option>
+          <option value="IT">Information Technology (IT)</option>
+          <option value="AIDS">Artificial Intelligence &amp; Data Science (AIDS)</option>
+        </select>
+      </div>
+
+      <div id="profileError" class="profile-error" style="display:none;">
+        Please select your Year, Semester, and Branch.
+      </div>
+
+      <button type="submit" class="profile-submit-btn">
+        Start Chatting →
+      </button>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════
+     MAIN APPLICATION LAYOUT  (full-page, ChatGPT-style)
+     ═══════════════════════════════════════════════════════════ -->
+<div class="app-layout" id="appLayout" style="display:none;">
+
+  <!-- ── Sidebar ───────────────────────────────────────────── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">AR</div>
+      <span class="sidebar-brand">AcaRAG Pro</span>
+    </div>
+
+    <button class="new-chat-btn" onclick="newChat()">
+      + New Conversation
+    </button>
+
+    <!-- Past conversations list -->
+    <div class="conv-list-label">Recent Conversations</div>
+    <div class="conv-list" id="convList">
+      <!-- populated by renderConvList() -->
+    </div>
+
+    <!-- Student profile card in sidebar -->
+    <div class="sidebar-profile" id="sidebarProfile">
+      <div class="sp-label">Logged in as</div>
+      <div class="sp-name" id="spName">—</div>
+      <div class="sp-details" id="spDetails">—</div>
+      <button class="sp-edit-btn" onclick="editProfile()">Edit Profile</button>
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="footer-item">
+        <span id="statusDot" class="status-dot"></span>
+        <span id="statusLabel" class="status-label">Connecting...</span>
+      </div>
+      <div class="footer-links">
+        <button class="theme-toggle-btn" onclick="toggleTheme()">🌙 Dark Mode</button>
+        <a class="admin-link" href="/admin.html">⚙ Admin</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Main chat area ────────────────────────────────────── -->
+  <main class="chat-main">
+
+    <!-- Header bar -->
+    <div class="chat-topbar">
+      <button class="sidebar-toggle-btn" onclick="toggleSidebar()" title="Toggle sidebar">☰</button>
+      <div class="topbar-title">
+        <span class="topbar-bot-name">Academic Assistant</span>
+        <span class="topbar-college">SVECW · Bhimavaram (Autonomous)</span>
+      </div>
+      <div class="topbar-profile-chip" id="topbarChip">
+        <!-- filled by JS -->
+      </div>
+    </div>
+
+    <!-- Messages area -->
+    <div class="chat-body" id="chatBody">
+      <!-- Welcome message injected by JS after profile is set -->
+    </div>
+
+    <!-- Emoji panel -->
+    <div class="emoji-panel" id="emojiPanel">
+      <span onclick="addEmoji('😀')">😀</span>
+      <span onclick="addEmoji('👍')">👍</span>
+      <span onclick="addEmoji('🙏')">🙏</span>
+      <span onclick="addEmoji('🎉')">🎉</span>
+      <span onclick="addEmoji('💡')">💡</span>
+      <span onclick="addEmoji('📚')">📚</span>
+      <span onclick="addEmoji('📝')">📝</span>
+      <span onclick="addEmoji('🔍')">🔍</span>
+      <span onclick="addEmoji('📖')">📖</span>
+      <span onclick="addEmoji('📊')">📊</span>
+      <span onclick="addEmoji('🧠')">🧠</span>
+      <span onclick="addEmoji('😊')">😊</span>
+      <span onclick="addEmoji('😂')">😂</span>
+      <span onclick="addEmoji('👋')">👋</span>
+    </div>
+
+    <!-- Input bar -->
+    <div class="chat-input-bar">
+      <div class="chat-input-inner">
+        <button class="emoji-btn" onclick="toggleEmoji()" title="Emoji">😊</button>
+        <textarea id="userInput" placeholder="Ask about exams, syllabus, regulations, calendar..." rows="1"
+          oninput="autoResize(this)"></textarea>
+        <button class="send-btn" onclick="sendMessage()" title="Send (Enter)">
+          <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
+      </div>
+      <p class="input-hint">Answers are strictly based on official SVECW documents.</p>
+    </div>
+
+  </main>
+</div>
+
+<script src="script.js?v=2"></script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+{
+  "29bc7cab49b87f028f3d3d46707d88698cca0aa7e8fd21f0a4235dd322a5c142": {
+    "query": "What are few Regulations",
+    "answer": "Based on the provided academic context, here are a few regulations mentioned:\n\n1. Students joining the B.Tech. Programme shall have to complete the programme in a stipulated time frame of 8 years from the date of joining.\n2. Students joining the B.Tech. Programme in the third semester directly through Lateral Entry Scheme (LES) shall have to complete the programme in a stipulated time frame of 6 years from the date of joining.\n3. The Semester End Examinations (SEE) in all the subjects shall be conducted at the end of each semester for all the eight semesters.\n4. A student shall be eligible for promotion to the next semester if they satisfy the attendance requirements.\n5. Detained and break-in study candidates are not eligible for the award of First Class with Distinction.\n6. The performance of a student in each semester shall be evaluated subject-wise with a maximum of 100 marks for theory and 100 marks for practical subjects.",
+    "sources": [
+      {
+        "document": "regulations R23.pdf",
+        "page_number": 6
+      },
+      {
+        "document": "regulations R23.pdf",
+        "page_number": 7
+      },
+      {
+        "document": "regulations R22.pdf",
+        "page_number": 5
+      },
+      {
+        "document": "regulations R23.pdf",
+        "page_number": 21
+      },
+      {
+        "document": "regulations R22.pdf",
+        "page_number": 28
+      },
+      {
+        "document": "regulations R23.pdf",
+        "page_number": 29
+      },
+      {
+        "document": "regulations R23.pdf",
+        "page_number": 5
+      },
+      {
+        "document": "2025-26-I-B.Tech-Academic-Calendar (1).pdf",
+        "page_number": 1
+      }
+    ],
+    "hit_count": 0,
+    "cached_at": "2026-03-07T16:13:05.507675",
+    "last_accessed": "2026-03-07T16:13:05.507691"
+  },
+  "eb7cd20cc718fc5d9a1d6b7593a8a2a3e248f66d3f64750f42e46991b9911460": {
+    "query": "What are my syllabus for this semester",
+    "answer": "As a 1st Year, Semester 2, CSE student, your syllabus for this semester includes:\n\n* BASIC ELECTRICAL & ELECTRONICS ENGINEERING (Subject Code: UGBS2T1123)\n\t+ PART-A: BASIC ELECTRICAL ENGINEERING\n\t+ Course Objectives: To expose to the field of electrical & electronics engineering, laws and principles of electrical/electronic engineering and to acquire fundamental knowledge in the relevant field.\n\t+ Course Outcomes:\n\t\t- CO1: Remember the fundamental laws, operating principles of motors, generators, MC and MI instruments.\n\t\t- CO2: Understand the problem solving concepts associated to AC and DC circuits.\n\nPlease note that the provided context only includes information about the BASIC ELECTRICAL & ELECTRONICS ENGINEERING subject. For a complete syllabus, you may need to refer to additional documents or resources.",
+    "sources": [
+      {
+        "document": "2025-26-I-B.Tech-Academic-Calendar (1).pdf",
+        "page_number": 1
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 18
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 19
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 3
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 16
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 38
+      },
+      {
+        "document": "regulations R22.pdf",
+        "page_number": 25
+      },
+      {
+        "document": "regulations R23.pdf",
+        "page_number": 5
+      }
+    ],
+    "hit_count": 0,
+    "cached_at": "2026-03-07T16:15:35.349955",
+    "last_accessed": "2026-03-07T16:15:35.349967"
+  },
+  "0b99acfe4463d08d319c1ce8fcfcaacd3b91e5f8096bc09209ad52a53ff96ebe": {
+    "query": "What are topics included in Data Structure Laboratory",
+    "answer": "The Data Structure Laboratory syllabus is not fully provided in the given context. However, based on the available information, the course objectives and outcomes for the Data Structures Lab (UGCS2P0323) are mentioned, but the specific topics or units covered in the lab are not detailed.\n\nThe course outcomes for the Data Structures Lab include:\n* CO1: Explain the role of linear data structures in organizing and accessing data efficiently in algorithms.\n* CO2: Design, implement and apply linked lists for dynamic data storage.\n\nFor a comprehensive list of topics, it is recommended to refer to the complete syllabus document for the Data Structure Laboratory. \n\nInformation not available in provided academic documents regarding the specific topics included in the Data Structure Laboratory.",
+    "sources": [
+      {
+        "document": "2025-26-I-B.Tech-Academic-Calendar (1).pdf",
+        "page_number": 1
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 45
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 46
+      },
+      {
+        "document": "R23-CSE-I-year-Syllabus.pdf",
+        "page_number": 56
+      }
+    ],
+    "hit_count": 0,
+    "cached_at": "2026-03-07T16:18:14.704442",
+    "last_accessed": "2026-03-07T16:18:14.704456"
+  }
+}

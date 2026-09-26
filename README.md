@@ -173,7 +173,9 @@ Run using Live Server in VS Code.
 - When are the semester holidays?
 
 ---
+## Live Demo
 
+ https://academic-rag-chatbot.onrender.com
 
 ---
 

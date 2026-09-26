@@ -548,7 +548,7 @@ def run_ingestion():
     print(f"Embedding device: {device.upper()}"
           + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else " (no GPU found)"))
     embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_name="sentence-transformers/paraphrase-MiniLM-L3-v2",
         model_kwargs={"device": device},
     )
 

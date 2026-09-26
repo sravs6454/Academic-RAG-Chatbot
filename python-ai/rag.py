@@ -44,11 +44,15 @@ _vectorstore = None
 _llm         = None
 
 
+
+
 def _get_embeddings():
     global _embeddings
     if _embeddings is None:
         _embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name="sentence-transformers/paraphrase-MiniLM-L3-v2",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
         )
     return _embeddings
 
@@ -541,7 +545,7 @@ def _retrieve_docs(question: str, student_context: dict):
                 # k=50 to fetch all general doc chunks (faculty file ~44 chunks)
                 # so the LLM can determine the total count from the highest S.No.
                 lane_d = vectorstore.similarity_search(
-                    search_query, k=50,
+                    search_query, k=15,  
                     filter={"doc_type": {"$eq": "general"}},
                 )
                 _add(lane_d)
@@ -783,7 +787,7 @@ def answer_question(question: str, history: list,
         if type_counts.get(doc_type, 0) >= limit:
             continue
 
-        if total_chars + len(content) > 20000:
+        if total_chars + len(content) > 12000:
             break
 
         label = f"[Document: {source} | Page: {page}"

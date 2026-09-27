@@ -75,14 +75,17 @@ def _get_vectorstore():
                 "ChromaDB not found. Run python ingest.py first."
             )
 
+        _log_memory("before Chroma")
+
         _vectorstore = Chroma(
             persist_directory=CHROMA_PATH,
             embedding_function=_get_embeddings(),
         )
 
+        _log_memory("after Chroma")
+
     _log_memory("after vectorstore")
     return _vectorstore
-
 
 def reset_vectorstore():
     """Release the in-memory vectorstore singleton so the next query

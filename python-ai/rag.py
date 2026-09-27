@@ -9,15 +9,13 @@ What changed from v1:
       → Falls back to unfiltered search if filtered result is empty
   - Student context is injected into the LLM prompt for personalized answers.
 
-Unchanged: index path, embedding model, GROQ model, prompt safety rules.
+Changed: ChromaDB and local embedding model removed; retrieval uses a lightweight SQLite text index.
 """
 
 import os
 import re
-import json
-import numpy as np
+import sqlite3
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain_core.documents import Document
 
@@ -38,59 +36,52 @@ def _log_memory(stage):
     ).ru_maxrss / 1024
 
     print(f"[MEMORY] {stage}: {memory_mb:.1f} MB")
+
+
 # Expand digit-based elective/unit references to Roman numerals used in documents
-# e.g. "elective-3", "elective 3", "unit 3" → include Roman numeral form
 _DIGIT_TO_ROMAN = {"1": "I", "2": "II", "3": "III", "4": "IV", "5": "V"}
 
+
 def _expand_roman(text: str) -> str:
-    """Replace 'elective-N' / 'elective N' / 'unit N' with Roman numeral form."""
+    """Replace elective/unit numbers with Roman numeral form."""
     def _repl(m):
         roman = _DIGIT_TO_ROMAN.get(m.group(2), m.group(2))
         return f"{m.group(1)}-{roman}"
-    return re.sub(r'\b(elective|unit|pe|oe|joe)[\s\-](\d)\b', _repl, text,
-                  flags=re.IGNORECASE)
+
+    return re.sub(
+        r'\b(elective|unit|pe|oe|joe)[\s\-](\d)\b',
+        _repl,
+        text,
+        flags=re.IGNORECASE,
+    )
+
 
 load_dotenv()
 
-CHROMA_PATH  = os.path.join(os.path.dirname(__file__), "chroma_db")
+CHROMA_PATH = os.path.join(os.path.dirname(__file__), "chroma_db")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # ---------------------------------------------------------------------------
 # Singletons
 # ---------------------------------------------------------------------------
-_embeddings  = None
 _vectorstore = None
-_llm         = None
-
-
-
-
-def _get_embeddings():
-    global _embeddings
-    if _embeddings is None:
-        _embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/paraphrase-MiniLM-L3-v2",
-            model_kwargs={"device": "cpu"},
-            encode_kwargs={"normalize_embeddings": True},
-        )
-    _log_memory("after embeddings")
-    return _embeddings
+_llm = None
 
 
 def _matches_condition(value, condition):
-    """Match one metadata value against a Chroma-like filter condition."""
+    """Compatibility helper for the metadata filter subset used by this project."""
     if isinstance(condition, dict):
         if "$eq" in condition:
-            return value == condition["$eq"]
+            return str(value) == str(condition["$eq"])
         if "$in" in condition:
-            return value in condition["$in"]
+            return str(value) in {str(x) for x in condition["$in"]}
         if "$ne" in condition:
-            return value != condition["$ne"]
-    return value == condition
+            return str(value) != str(condition["$ne"])
+    return str(value) == str(condition)
 
 
 def _matches_filter(metadata, where):
-    """Support the subset of Chroma metadata filters used by this project."""
+    """Compatibility helper for Chroma-style filters."""
     if not where:
         return True
 
@@ -110,119 +101,288 @@ def _matches_filter(metadata, where):
 
 
 class LightweightVectorStore:
-    """Small NumPy-based replacement for ChromaDB.
+    """Very small SQLite-backed text index.
 
-    The embeddings are stored as a memory-mapped .npy file and document text
-    plus metadata are stored in JSON. This avoids Chroma/HNSW startup memory
-    overhead on Render's 512 MB free instance.
+    This intentionally uses only Python's built-in sqlite3 module.
+    No ChromaDB, NumPy, Sentence Transformers, PyTorch, or local embedding
+    model is loaded by the running web service.
     """
 
-    def __init__(self, index_path, embedding_function):
+    _FIELDS = {
+        "source": "source",
+        "year": "year",
+        "semester": "semester",
+        "branch": "branch",
+        "doc_type": "doc_type",
+        "page_number": "page_number",
+    }
+
+    _STOPWORDS = {
+        "a", "an", "and", "are", "as", "at", "be", "by", "do", "for",
+        "from", "how", "i", "in", "is", "it", "me", "my", "of", "on",
+        "or", "the", "this", "to", "what", "when", "where", "which",
+        "who", "will", "with", "you", "your", "have", "has", "does",
+    }
+
+    def __init__(self, index_path):
         self.index_path = index_path
-        self.embedding_function = embedding_function
+        self.db_path = os.path.join(index_path, "index.db")
 
-        embeddings_path = os.path.join(index_path, "embeddings.npy")
-        documents_path = os.path.join(index_path, "documents.json")
-
-        if not os.path.exists(embeddings_path):
+        if not os.path.exists(self.db_path):
             raise RuntimeError(
-                "Vector index not found. Run python ingest.py first."
+                "Lightweight text index not found. Run python ingest.py first."
             )
 
-        if not os.path.exists(documents_path):
+        self.conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False,
+        )
+        self.conn.row_factory = sqlite3.Row
+        self._documents_cache = None
+
+        try:
+            self.document_count = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) FROM documents"
+                ).fetchone()[0]
+            )
+        except Exception as e:
+            self.conn.close()
             raise RuntimeError(
-                "Document index not found. Run python ingest.py first."
+                f"Invalid lightweight index: {e}"
             )
 
-        self.embeddings = np.load(embeddings_path, mmap_mode="r")
+        if self.document_count == 0:
+            self.conn.close()
+            raise RuntimeError("The lightweight text index is empty.")
 
-        with open(documents_path, "r", encoding="utf-8") as f:
-            raw_documents = json.load(f)
-
-        self.documents = [
-            Document(
-                page_content=item["page_content"],
-                metadata=item.get("metadata", {})
-            )
-            for item in raw_documents
-        ]
-
-        if len(self.embeddings) != len(self.documents):
-            raise RuntimeError(
-                f"Index mismatch: {len(self.embeddings)} embeddings but "
-                f"{len(self.documents)} documents."
-            )
-
-        # Keep a Chroma-like collection interface for the existing direct
-        # metadata retrieval code used by subject-list and timetable queries.
         self._collection = self
 
-    def similarity_search(self, query, k=4, filter=None):
-        """Return the top-k documents by cosine similarity."""
-        if not self.documents:
-            return []
+    @property
+    def documents(self):
+        """Compatibility property used by local diagnostics."""
+        if self._documents_cache is None:
+            rows = self.conn.execute(
+                "SELECT page_content, metadata_json FROM documents ORDER BY id"
+            ).fetchall()
+            import json
+            self._documents_cache = [
+                Document(
+                    page_content=row["page_content"],
+                    metadata=json.loads(row["metadata_json"]),
+                )
+                for row in rows
+            ]
+        return self._documents_cache
 
-        query_vector = np.asarray(
-            self.embedding_function.embed_query(query),
-            dtype=np.float32
-        )
-
-        norm = np.linalg.norm(query_vector)
-        if norm > 0:
-            query_vector = query_vector / norm
-
-        candidate_indices = [
-            i for i, document in enumerate(self.documents)
-            if _matches_filter(document.metadata, filter)
+    @staticmethod
+    def _tokens(text):
+        tokens = re.findall(r"[a-z0-9]+", (text or "").lower())
+        return [
+            token for token in tokens
+            if len(token) > 1 and token not in LightweightVectorStore._STOPWORDS
         ]
 
-        if not candidate_indices:
+    def _condition_sql(self, where):
+        """Convert the small Chroma-style filter subset into SQLite SQL."""
+        if not where:
+            return "", []
+
+        if "$and" in where:
+            parts = []
+            params = []
+            for item in where["$and"]:
+                sql, p = self._condition_sql(item)
+                if sql:
+                    parts.append(f"({sql})")
+                    params.extend(p)
+            return " AND ".join(parts), params
+
+        if "$or" in where:
+            parts = []
+            params = []
+            for item in where["$or"]:
+                sql, p = self._condition_sql(item)
+                if sql:
+                    parts.append(f"({sql})")
+                    params.extend(p)
+            return " OR ".join(parts), params
+
+        parts = []
+        params = []
+
+        for key, condition in where.items():
+            column = self._FIELDS.get(key)
+            if not column:
+                continue
+
+            if isinstance(condition, dict):
+                if "$eq" in condition:
+                    parts.append(f"{column} = ?")
+                    params.append(self._normalize_filter_value(key, condition["$eq"]))
+                elif "$ne" in condition:
+                    parts.append(f"{column} != ?")
+                    params.append(self._normalize_filter_value(key, condition["$ne"]))
+                elif "$in" in condition:
+                    values = list(condition["$in"])
+                    if not values:
+                        parts.append("0")
+                    else:
+                        placeholders = ",".join("?" for _ in values)
+                        parts.append(f"{column} IN ({placeholders})")
+                        params.extend(
+                            self._normalize_filter_value(key, value)
+                            for value in values
+                        )
+            else:
+                parts.append(f"{column} = ?")
+                params.append(self._normalize_filter_value(key, condition))
+
+        return " AND ".join(parts), params
+
+    @staticmethod
+    def _normalize_filter_value(key, value):
+        if key == "page_number":
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return value
+        return str(value)
+
+    def _fetch_candidates(self, query, filter):
+        filter_sql, filter_params = self._condition_sql(filter)
+
+        terms = self._tokens(query)
+        params = list(filter_params)
+
+        # Use SQL LIKE to avoid loading all document text when the query has
+        # useful terms. If nothing matches, fall back to all filtered rows.
+        match_sql = ""
+        if terms:
+            like_parts = []
+            for term in terms[:12]:
+                like_parts.append(
+                    "(lower(page_content) LIKE ? OR lower(source) LIKE ?)"
+                )
+                pattern = f"%{term}%"
+                params.extend([pattern, pattern])
+            match_sql = " OR ".join(like_parts)
+
+        clauses = []
+        if filter_sql:
+            clauses.append(f"({filter_sql})")
+        if match_sql:
+            clauses.append(f"({match_sql})")
+
+        sql = (
+            "SELECT id, page_content, metadata_json, source "
+            "FROM documents"
+        )
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+
+        rows = self.conn.execute(sql, params).fetchall()
+
+        if not rows and match_sql:
+            fallback_params = list(filter_params)
+            fallback_sql = (
+                "SELECT id, page_content, metadata_json, source "
+                "FROM documents"
+            )
+            if filter_sql:
+                fallback_sql += f" WHERE {filter_sql}"
+            rows = self.conn.execute(
+                fallback_sql,
+                fallback_params,
+            ).fetchall()
+
+        return rows, terms
+
+    def similarity_search(self, query, k=4, filter=None):
+        """Return top-k documents using lightweight token-overlap scoring."""
+        if self.document_count == 0:
             return []
 
-        candidate_embeddings = self.embeddings[candidate_indices]
-        scores = np.asarray(candidate_embeddings @ query_vector).reshape(-1)
+        rows, terms = self._fetch_candidates(query, filter)
 
-        k = min(int(k), len(candidate_indices))
-        if k <= 0:
+        if not rows:
             return []
 
-        # Fast top-k selection, followed by ordering from highest similarity.
-        if k < len(scores):
-            top_local = np.argpartition(scores, -k)[-k:]
-            top_local = top_local[np.argsort(scores[top_local])[::-1]]
-        else:
-            top_local = np.argsort(scores)[::-1]
+        if not terms:
+            return [
+                Document(
+                    page_content=row["page_content"],
+                    metadata=__import__("json").loads(row["metadata_json"]),
+                )
+                for row in rows[:int(k)]
+            ]
 
+        scored = []
+
+        for row in rows:
+            content = row["page_content"].lower()
+            source = row["source"].lower()
+            score = 0.0
+
+            for term in terms:
+                occurrences = content.count(term)
+                if occurrences:
+                    # Repeated query terms help, but with diminishing returns.
+                    score += min(occurrences, 5) * 1.0
+
+                if term in source:
+                    score += 2.0
+
+            # Small bonus when multiple distinct query terms occur.
+            distinct_hits = sum(1 for term in terms if term in content)
+            score += distinct_hits * 1.5
+
+            if score > 0:
+                scored.append((score, row))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        import json
         return [
-            self.documents[candidate_indices[int(i)]]
-            for i in top_local
+            Document(
+                page_content=row["page_content"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for _, row in scored[:max(0, int(k))]
         ]
 
     def get(self, where=None):
-        """Chroma-compatible metadata/document retrieval used by rag.py."""
-        matched_indices = [
-            i for i, document in enumerate(self.documents)
-            if _matches_filter(document.metadata, where)
-        ]
+        """Chroma-compatible metadata/document retrieval."""
+        filter_sql, params = self._condition_sql(where)
 
+        sql = (
+            "SELECT id, page_content, metadata_json "
+            "FROM documents"
+        )
+        if filter_sql:
+            sql += f" WHERE {filter_sql}"
+        sql += " ORDER BY id"
+
+        rows = self.conn.execute(sql, params).fetchall()
+
+        import json
         return {
-            "ids": [str(i) for i in matched_indices],
-            "documents": [
-                self.documents[i].page_content for i in matched_indices
-            ],
+            "ids": [str(row["id"]) for row in rows],
+            "documents": [row["page_content"] for row in rows],
             "metadatas": [
-                self.documents[i].metadata for i in matched_indices
+                json.loads(row["metadata_json"])
+                for row in rows
             ],
         }
 
     def close(self):
-        """Release the memory-mapped embedding file."""
-        try:
-            mmap_obj = getattr(self.embeddings, "_mmap", None)
-            if mmap_obj is not None:
-                mmap_obj.close()
-        except Exception:
-            pass
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = None
+        self._documents_cache = None
 
 
 def _get_vectorstore():
@@ -231,16 +391,13 @@ def _get_vectorstore():
     _log_memory("before vectorstore")
 
     if _vectorstore is None:
-        print("[INDEX] Loading lightweight NumPy vector index...")
+        print("[INDEX] Loading lightweight SQLite text index...")
 
-        _vectorstore = LightweightVectorStore(
-            CHROMA_PATH,
-            _get_embeddings()
-        )
+        _vectorstore = LightweightVectorStore(CHROMA_PATH)
 
         print(
-            f"[INDEX] Loaded {len(_vectorstore.documents)} documents "
-            f"with { _vectorstore.embeddings.shape[1] }-dimensional embeddings."
+            f"[INDEX] Loaded {_vectorstore.document_count} documents "
+            "from SQLite text index."
         )
 
         _log_memory("after vectorstore")
@@ -249,7 +406,7 @@ def _get_vectorstore():
 
 
 def reset_vectorstore():
-    """Release the vector index singleton so the next query reloads it."""
+    """Release the lightweight SQLite index singleton."""
     global _vectorstore
 
     if _vectorstore is not None:

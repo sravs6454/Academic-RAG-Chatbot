@@ -18,12 +18,10 @@ import os
 import re
 import shutil
 import json
-
-import numpy as np
+import sqlite3
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "..", "dataset")
@@ -999,9 +997,9 @@ def run_ingestion():
     ingest_progress.update(
         {
             "chunks_total": len(chunks),
-            "stage": "embedding",
+            "stage": "indexing",
             "message": (
-                f"Generating embeddings for "
+                f"Building lightweight text index for "
                 f"{len(chunks)} chunks…"
             ),
         }
@@ -1014,127 +1012,136 @@ def run_ingestion():
     CHROMA_NEW = CHROMA_PATH + "_new"
 
     if os.path.exists(CHROMA_NEW):
+        shutil.rmtree(CHROMA_NEW)
 
-        shutil.rmtree(
-            CHROMA_NEW
+    os.makedirs(CHROMA_NEW, exist_ok=True)
+
+    # -----------------------------------------------------------------------
+    # Lightweight SQLite text index
+    # -----------------------------------------------------------------------
+    #
+    # No local embedding model is used here.
+    # SQLite is part of Python's standard library and keeps the Render
+    # runtime extremely small compared with Chroma + Sentence Transformers.
+    #
+
+    index_db = os.path.join(CHROMA_NEW, "index.db")
+
+    print("Building lightweight SQLite text index...")
+
+    conn = sqlite3.connect(index_db)
+
+    try:
+        conn.execute(
+            """
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY,
+                page_content TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                source TEXT,
+                year TEXT,
+                semester TEXT,
+                branch TEXT,
+                doc_type TEXT,
+                page_number INTEGER
+            )
+            """
         )
 
-    os.makedirs(
-        CHROMA_NEW,
-        exist_ok=True,
-    )
-
-    # -----------------------------------------------------------------------
-    # Embeddings
-    # -----------------------------------------------------------------------
-
-    print(
-        "Generating embeddings "
-        "(this may take a few minutes)..."
-    )
-
-    import torch
-
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
-    )
-
-    print(
-        f"Embedding device: {device.upper()}"
-        + (
-            f" ({torch.cuda.get_device_name(0)})"
-            if device == "cuda"
-            else " (no GPU found)"
+        conn.execute(
+            "CREATE INDEX idx_documents_source "
+            "ON documents(source)"
         )
-    )
-
-    embeddings = HuggingFaceEmbeddings(
-        model_name=(
-            "sentence-transformers/"
-            "paraphrase-MiniLM-L3-v2"
-        ),
-        model_kwargs={
-            "device": device
-        },
-        encode_kwargs={
-            "normalize_embeddings": True
-        },
-    )
-
-    # -----------------------------------------------------------------------
-    # Generate lightweight NumPy vector index
-    # -----------------------------------------------------------------------
-
-    print(
-        "Generating lightweight "
-        "NumPy vector index..."
-    )
-
-    texts = [
-        chunk.page_content
-        for chunk in chunks
-    ]
-
-    # Generate embeddings in one operation.
-    vectors = embeddings.embed_documents(
-        texts
-    )
-
-    vectors = np.asarray(
-        vectors,
-        dtype=np.float32,
-    )
-
-    # Normalize for cosine similarity.
-    norms = np.linalg.norm(
-        vectors,
-        axis=1,
-        keepdims=True,
-    )
-
-    vectors = vectors / np.maximum(
-        norms,
-        1e-12,
-    )
-
-    # Save embeddings.
-    embeddings_path = os.path.join(
-        CHROMA_NEW,
-        "embeddings.npy",
-    )
-
-    np.save(
-        embeddings_path,
-        vectors,
-    )
-
-    # Save document text + metadata.
-    documents_path = os.path.join(
-        CHROMA_NEW,
-        "documents.json",
-    )
-
-    with open(
-        documents_path,
-        "w",
-        encoding="utf-8",
-    ) as f:
-
-        json.dump(
-            [
-                {
-                    "page_content": chunk.page_content,
-                    "metadata": chunk.metadata,
-                }
-                for chunk in chunks
-            ],
-            f,
-            ensure_ascii=False,
+        conn.execute(
+            "CREATE INDEX idx_documents_year "
+            "ON documents(year)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_documents_branch "
+            "ON documents(branch)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_documents_doc_type "
+            "ON documents(doc_type)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_documents_page "
+            "ON documents(page_number)"
         )
 
-    # Save basic index information.
+        rows = []
+
+        for chunk in chunks:
+            metadata = dict(chunk.metadata or {})
+
+            page_number = metadata.get("page_number")
+            try:
+                page_number = int(page_number)
+            except (TypeError, ValueError):
+                page_number = None
+
+            rows.append(
+                (
+                    chunk.page_content,
+                    json.dumps(
+                        metadata,
+                        ensure_ascii=False,
+                    ),
+                    str(metadata.get("source", "")),
+                    str(metadata.get("year", "all")),
+                    str(metadata.get("semester", "all")),
+                    str(metadata.get("branch", "all")),
+                    str(metadata.get("doc_type", "general")),
+                    page_number,
+                )
+            )
+
+            if len(rows) >= 500:
+                conn.executemany(
+                    """
+                    INSERT INTO documents (
+                        page_content,
+                        metadata_json,
+                        source,
+                        year,
+                        semester,
+                        branch,
+                        doc_type,
+                        page_number
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+                conn.commit()
+                rows.clear()
+
+        if rows:
+            conn.executemany(
+                """
+                INSERT INTO documents (
+                    page_content,
+                    metadata_json,
+                    source,
+                    year,
+                    semester,
+                    branch,
+                    doc_type,
+                    page_number
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.commit()
+
+        conn.execute("VACUUM")
+        conn.commit()
+
+    finally:
+        conn.close()
+
+    # Save basic index information for diagnostics.
     index_info_path = os.path.join(
         CHROMA_NEW,
         "index_info.json",
@@ -1145,42 +1152,24 @@ def run_ingestion():
         "w",
         encoding="utf-8",
     ) as f:
-
         json.dump(
             {
-                "embedding_model": (
-                    "sentence-transformers/"
-                    "paraphrase-MiniLM-L3-v2"
-                ),
-                "embedding_dimension": int(
-                    vectors.shape[1]
-                ),
+                "index_type": "sqlite_text",
                 "document_count": len(chunks),
-                "normalized": True,
+                "embedding_model": None,
+                "embedding_dimension": None,
             },
             f,
             indent=2,
         )
 
     print(
-        f"[OK] Saved {len(chunks)} embeddings."
+        f"[OK] Saved {len(chunks)} documents to SQLite index."
     )
 
     print(
-        f"[OK] Embedding shape: "
-        f"{vectors.shape}"
+        f"[OK] Index database: {index_db}"
     )
-
-    print(
-        f"[OK] Index files written to: "
-        f"{CHROMA_NEW}"
-    )
-
-    # -----------------------------------------------------------------------
-    # Release large temporary embedding matrix
-    # -----------------------------------------------------------------------
-
-    del vectors
 
     # -----------------------------------------------------------------------
     # Swap new index into place
@@ -1198,10 +1187,7 @@ def run_ingestion():
     try:
 
         if os.path.exists(CHROMA_PATH):
-
-            shutil.rmtree(
-                CHROMA_PATH
-            )
+            shutil.rmtree(CHROMA_PATH)
 
         os.rename(
             CHROMA_NEW,
@@ -1214,15 +1200,11 @@ def run_ingestion():
         )
 
         print(
-            "[OK] Lightweight index created:"
+            "[OK] Lightweight SQLite index created:"
         )
 
         print(
-            "     - embeddings.npy"
-        )
-
-        print(
-            "     - documents.json"
+            "     - index.db"
         )
 
         print(

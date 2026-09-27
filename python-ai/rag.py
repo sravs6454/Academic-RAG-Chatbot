@@ -19,6 +19,12 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
 
+
+import resource
+
+def _log_memory(stage):
+    memory_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"[MEMORY] {stage}: {memory_mb:.1f} MB")
 # Expand digit-based elective/unit references to Roman numerals used in documents
 # e.g. "elective-3", "elective 3", "unit 3" → include Roman numeral form
 _DIGIT_TO_ROMAN = {"1": "I", "2": "II", "3": "III", "4": "IV", "5": "V"}
@@ -54,20 +60,27 @@ def _get_embeddings():
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True},
         )
+    _log_memory("after embeddings")
     return _embeddings
 
 
 def _get_vectorstore():
     global _vectorstore
+
+    _log_memory("before vectorstore")
+
     if _vectorstore is None:
         if not os.path.exists(CHROMA_PATH):
             raise RuntimeError(
-                "ChromaDB not found. Run  python ingest.py  first."
+                "ChromaDB not found. Run python ingest.py first."
             )
+
         _vectorstore = Chroma(
             persist_directory=CHROMA_PATH,
             embedding_function=_get_embeddings(),
         )
+
+    _log_memory("after vectorstore")
     return _vectorstore
 
 
@@ -553,7 +566,7 @@ def _retrieve_docs(question: str, student_context: dict):
                 pass
 
         if len(merged) >= 2:
-            return merged  # No arbitrary cap; answer_question's 20 000-char context limit handles size
+            return merged[:20] # No arbitrary cap; answer_question's 20 000-char context limit handles size
 
     # Fallback — unfiltered search (catches mis-tagged files, no-context queries)
     return vectorstore.similarity_search(search_query, k=10)

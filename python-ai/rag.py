@@ -4,26 +4,39 @@ AcaRAG Pro — RAG + CAG Engine  (v2 — student context aware)
 What changed from v1:
   - answer_question() now accepts an optional student_context dict:
       { "year": "2", "semester": "1", "branch": "CSE", "name": "Priya" }
-  - ChromaDB retrieval is filtered by year+semester when provided:
+  - Vector retrieval is filtered by year+semester when provided:
       → First tries documents matching student's year/semester + "all" docs
       → Falls back to unfiltered search if filtered result is empty
   - Student context is injected into the LLM prompt for personalized answers.
 
-Unchanged: ChromaDB path, embedding model, GROQ model, prompt safety rules.
+Unchanged: index path, embedding model, GROQ model, prompt safety rules.
 """
 
 import os
 import re
+import json
+import numpy as np
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
 from langchain_groq import ChatGroq
+from langchain_core.documents import Document
 
 
-import resource
+try:
+    import resource
+except ImportError:
+    resource = None
+
 
 def _log_memory(stage):
-    memory_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    if resource is None:
+        print(f"[MEMORY] {stage}: unavailable on Windows")
+        return
+
+    memory_mb = resource.getrusage(
+        resource.RUSAGE_SELF
+    ).ru_maxrss / 1024
+
     print(f"[MEMORY] {stage}: {memory_mb:.1f} MB")
 # Expand digit-based elective/unit references to Roman numerals used in documents
 # e.g. "elective-3", "elective 3", "unit 3" → include Roman numeral form
@@ -64,37 +77,196 @@ def _get_embeddings():
     return _embeddings
 
 
+def _matches_condition(value, condition):
+    """Match one metadata value against a Chroma-like filter condition."""
+    if isinstance(condition, dict):
+        if "$eq" in condition:
+            return value == condition["$eq"]
+        if "$in" in condition:
+            return value in condition["$in"]
+        if "$ne" in condition:
+            return value != condition["$ne"]
+    return value == condition
+
+
+def _matches_filter(metadata, where):
+    """Support the subset of Chroma metadata filters used by this project."""
+    if not where:
+        return True
+
+    if "$and" in where:
+        return all(_matches_filter(metadata, item) for item in where["$and"])
+
+    if "$or" in where:
+        return any(_matches_filter(metadata, item) for item in where["$or"])
+
+    for key, condition in where.items():
+        if key.startswith("$"):
+            continue
+        if not _matches_condition(metadata.get(key), condition):
+            return False
+
+    return True
+
+
+class LightweightVectorStore:
+    """Small NumPy-based replacement for ChromaDB.
+
+    The embeddings are stored as a memory-mapped .npy file and document text
+    plus metadata are stored in JSON. This avoids Chroma/HNSW startup memory
+    overhead on Render's 512 MB free instance.
+    """
+
+    def __init__(self, index_path, embedding_function):
+        self.index_path = index_path
+        self.embedding_function = embedding_function
+
+        embeddings_path = os.path.join(index_path, "embeddings.npy")
+        documents_path = os.path.join(index_path, "documents.json")
+
+        if not os.path.exists(embeddings_path):
+            raise RuntimeError(
+                "Vector index not found. Run python ingest.py first."
+            )
+
+        if not os.path.exists(documents_path):
+            raise RuntimeError(
+                "Document index not found. Run python ingest.py first."
+            )
+
+        self.embeddings = np.load(embeddings_path, mmap_mode="r")
+
+        with open(documents_path, "r", encoding="utf-8") as f:
+            raw_documents = json.load(f)
+
+        self.documents = [
+            Document(
+                page_content=item["page_content"],
+                metadata=item.get("metadata", {})
+            )
+            for item in raw_documents
+        ]
+
+        if len(self.embeddings) != len(self.documents):
+            raise RuntimeError(
+                f"Index mismatch: {len(self.embeddings)} embeddings but "
+                f"{len(self.documents)} documents."
+            )
+
+        # Keep a Chroma-like collection interface for the existing direct
+        # metadata retrieval code used by subject-list and timetable queries.
+        self._collection = self
+
+    def similarity_search(self, query, k=4, filter=None):
+        """Return the top-k documents by cosine similarity."""
+        if not self.documents:
+            return []
+
+        query_vector = np.asarray(
+            self.embedding_function.embed_query(query),
+            dtype=np.float32
+        )
+
+        norm = np.linalg.norm(query_vector)
+        if norm > 0:
+            query_vector = query_vector / norm
+
+        candidate_indices = [
+            i for i, document in enumerate(self.documents)
+            if _matches_filter(document.metadata, filter)
+        ]
+
+        if not candidate_indices:
+            return []
+
+        candidate_embeddings = self.embeddings[candidate_indices]
+        scores = np.asarray(candidate_embeddings @ query_vector).reshape(-1)
+
+        k = min(int(k), len(candidate_indices))
+        if k <= 0:
+            return []
+
+        # Fast top-k selection, followed by ordering from highest similarity.
+        if k < len(scores):
+            top_local = np.argpartition(scores, -k)[-k:]
+            top_local = top_local[np.argsort(scores[top_local])[::-1]]
+        else:
+            top_local = np.argsort(scores)[::-1]
+
+        return [
+            self.documents[candidate_indices[int(i)]]
+            for i in top_local
+        ]
+
+    def get(self, where=None):
+        """Chroma-compatible metadata/document retrieval used by rag.py."""
+        matched_indices = [
+            i for i, document in enumerate(self.documents)
+            if _matches_filter(document.metadata, where)
+        ]
+
+        return {
+            "ids": [str(i) for i in matched_indices],
+            "documents": [
+                self.documents[i].page_content for i in matched_indices
+            ],
+            "metadatas": [
+                self.documents[i].metadata for i in matched_indices
+            ],
+        }
+
+    def close(self):
+        """Release the memory-mapped embedding file."""
+        try:
+            mmap_obj = getattr(self.embeddings, "_mmap", None)
+            if mmap_obj is not None:
+                mmap_obj.close()
+        except Exception:
+            pass
+
+
 def _get_vectorstore():
     global _vectorstore
 
     _log_memory("before vectorstore")
 
     if _vectorstore is None:
-        if not os.path.exists(CHROMA_PATH):
-            raise RuntimeError(
-                "ChromaDB not found. Run python ingest.py first."
-            )
+        print("[INDEX] Loading lightweight NumPy vector index...")
 
-        _log_memory("before Chroma")
-
-        _vectorstore = Chroma(
-            persist_directory=CHROMA_PATH,
-            embedding_function=_get_embeddings(),
+        _vectorstore = LightweightVectorStore(
+            CHROMA_PATH,
+            _get_embeddings()
         )
 
-        _log_memory("after Chroma")
+        print(
+            f"[INDEX] Loaded {len(_vectorstore.documents)} documents "
+            f"with { _vectorstore.embeddings.shape[1] }-dimensional embeddings."
+        )
 
-    _log_memory("after vectorstore")
+        _log_memory("after vectorstore")
+
     return _vectorstore
 
+
 def reset_vectorstore():
-    """Release the in-memory vectorstore singleton so the next query
-    reloads from disk. Called by app.py after a re-index completes so
-    the server picks up the freshly built ChromaDB without restarting."""
+    """Release the vector index singleton so the next query reloads it."""
     global _vectorstore
+
+    if _vectorstore is not None:
+        try:
+            _vectorstore.close()
+        except Exception:
+            pass
+
     _vectorstore = None
+
     import gc
     gc.collect()
+
+
+def _similarity_search(vectorstore, query, k=4, filter=None):
+    """Compatibility wrapper for the old Chroma similarity_search calls."""
+    return vectorstore.similarity_search(query, k=k, filter=filter)
 
 
 def _get_llm():
@@ -106,7 +278,7 @@ def _get_llm():
                 "Get a free key at: https://console.groq.com"
             )
         _llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             temperature=0,
             max_tokens=2048,
             api_key=GROQ_API_KEY,
@@ -121,7 +293,7 @@ def _get_llm():
 def _reformulate_query(question: str, history: list, student_context: dict) -> str:
     """
     Prepend conversation history for follow-up awareness.
-    Prepend student year/semester so ChromaDB semantic search is anchored
+    Prepend student year/semester so semantic search is anchored
     to the correct document group even without metadata filtering.
     """
     parts = []
@@ -197,7 +369,7 @@ def _retrieve_docs(question: str, student_context: dict):
     sees both branch-relevant material AND college-wide policies.
 
     Fallback: if student context is missing or both lanes return nothing,
-    falls back to an unfiltered search over all 8 000+ chunks.
+    falls back to an unfiltered search over all indexed chunks.
     """
     vectorstore  = _get_vectorstore()
     ctx    = student_context or {}
@@ -235,7 +407,7 @@ def _retrieve_docs(question: str, student_context: dict):
         # k=10 so multi-unit syllabi (5+ pages) get enough chunks retrieved
         if branch:
             try:
-                lane_a = vectorstore.similarity_search(
+                lane_a = _similarity_search(vectorstore, 
                     search_query, k=10,
                     filter={"$and": [
                         {"year":   {"$eq": year}},
@@ -251,7 +423,7 @@ def _retrieve_docs(question: str, student_context: dict):
         # k=12 (raised from 8) to prevent faculty/regulation files being displaced
         # by the many branch-specific syllabus files that also carry year=all.
         try:
-            lane_b = vectorstore.similarity_search(
+            lane_b = _similarity_search(vectorstore, 
                 search_query, k=12,
                 filter={"year": {"$eq": "all"}},
             )
@@ -263,7 +435,7 @@ def _retrieve_docs(question: str, student_context: dict):
         # Filtered to branch=all so we don't re-fetch Lane A's syllabus duplicates
         # k=12 so fee/date/schedule content isn't pushed out by calendar docs
         try:
-            lane_c = vectorstore.similarity_search(
+            lane_c = _similarity_search(vectorstore, 
                 search_query, k=12,
                 filter={"$and": [
                     {"year":   {"$eq": year}},
@@ -318,7 +490,7 @@ def _retrieve_docs(question: str, student_context: dict):
                     # the top-ranked syllabus file and elevate them to the front so the
                     # LLM sees the correct course structure table before any other content.
                     try:
-                        structure_pages = vectorstore.similarity_search(
+                        structure_pages = _similarity_search(vectorstore, 
                             search_query, k=8,
                             filter={"$and": [
                                 {"source":      {"$eq": top_src}},
@@ -340,10 +512,21 @@ def _retrieve_docs(question: str, student_context: dict):
                     # Detect "list all subjects" intent — student wants the full
                     # subject list for the semester, not just one subject's units.
                     _LIST_SUBJECTS_RE = re.compile(
-                        r'\b(what subjects|list subjects|my subjects|subjects (i|do i) have|'
-                        r'all subjects|subjects this semester|subjects for (this|my) semester)\b',
-                        re.IGNORECASE
-                    )
+                            r'\b('
+                            r'what subjects|'
+                            r'what are the subjects|'
+                            r'what subjects do i have|'
+                            r'list subjects|'
+                            r'list all subjects|'
+                            r'my subjects|'
+                            r'subjects (i|do i) have|'
+                            r'all subjects|'
+                            r'subjects this semester|'
+                            r'subjects for (this|my) semester|'
+                            r'subjects in (this|my) semester'
+                            r')\b',
+                            re.IGNORECASE
+                        )
                     is_list_subjects = bool(_LIST_SUBJECTS_RE.search(question))
 
                     _list_sub_sem_pages = None  # used by elevation below
@@ -381,7 +564,7 @@ def _retrieve_docs(question: str, student_context: dict):
                         # Expand to the top-ranked page and next page to capture
                         # UNIT II-V which rarely repeat the subject name in headings.
                         try:
-                            expansion = vectorstore.similarity_search(
+                            expansion = _similarity_search(vectorstore, 
                                 search_query, k=16,
                                 filter={"$and": [
                                     {"source":      {"$eq": top_src}},
@@ -392,7 +575,7 @@ def _retrieve_docs(question: str, student_context: dict):
                         except Exception:
                             # Fallback: broader source filter if $in on page fails
                             try:
-                                expansion = vectorstore.similarity_search(
+                                expansion = _similarity_search(vectorstore, 
                                     search_query, k=10,
                                     filter={"source": {"$eq": top_src}},
                                 )
@@ -520,12 +703,12 @@ def _retrieve_docs(question: str, student_context: dict):
                         # fetch ALL chunks from the source; for fee notifications 3 pages
                         # are enough.
                         if _is_timetable:
-                            expansion = vectorstore.similarity_search(
+                            expansion = _similarity_search(vectorstore, 
                                 search_query, k=20,
                                 filter={"source": {"$eq": top_src}},
                             )
                         else:
-                            expansion = vectorstore.similarity_search(
+                            expansion = _similarity_search(vectorstore, 
                                 search_query, k=10,
                                 filter={"$and": [
                                     {"source":      {"$eq": top_src}},
@@ -535,7 +718,7 @@ def _retrieve_docs(question: str, student_context: dict):
                         _add(expansion)
                     except Exception:
                         try:
-                            expansion = vectorstore.similarity_search(
+                            expansion = _similarity_search(vectorstore, 
                                 search_query, k=8,
                                 filter={"source": {"$eq": top_src}},
                             )
@@ -560,7 +743,7 @@ def _retrieve_docs(question: str, student_context: dict):
             try:
                 # k=50 to fetch all general doc chunks (faculty file ~44 chunks)
                 # so the LLM can determine the total count from the highest S.No.
-                lane_d = vectorstore.similarity_search(
+                lane_d = _similarity_search(vectorstore, 
                     search_query, k=15,  
                     filter={"doc_type": {"$eq": "general"}},
                 )
@@ -572,7 +755,7 @@ def _retrieve_docs(question: str, student_context: dict):
             return merged[:20] # No arbitrary cap; answer_question's 20 000-char context limit handles size
 
     # Fallback — unfiltered search (catches mis-tagged files, no-context queries)
-    return vectorstore.similarity_search(search_query, k=10)
+    return _similarity_search(vectorstore, search_query, k=10)
 
 
 # ---------------------------------------------------------------------------
